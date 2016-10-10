@@ -1,5 +1,11 @@
+# This file is part of the supplementary material for the manuscript:
+#
 # RetiNet: Automated AMD identification in OCT volumetric data
-# Copyright (C) 2016  Stefanos Apostolopoulos
+#
+# Copyright (C) 2016 Stefanos Apostolopoulos
+#                    Carlos Ciller
+#                    Sandro De Zanet
+#                    Raphael Sznitman
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -21,22 +27,31 @@ import h5py
 import keras
 import numpy as np
 import os
-import sys
 import yaml
 import zipfile
 
 from keras.models import *
 from keras.utils.data_utils import get_file
 
+from metrics import *
+
+
+def normalize(volume):
+    stdev = np.std(volume, dtype=np.float64)
+    mean = np.mean(volume, dtype=np.float64)
+    return (volume - np.float32(mean)) / np.float32(stdev)
+
+#np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)})
+
 archive = get_file('dataset.zip',
                    'https://dl.dropbox.com/s/10fg73028s8xdld/dataset.zip?dl=1',
                    cache_subdir='retinet',
-                   md5_hash='117f65f22c55e08de890b4b0a26f212c')
+                   md5_hash='04c6ad5a6d3e855f7a639ddcd3d8564a')
 
 print('Extracting dataset')
-# with zipfile.ZipFile(os.path.expanduser('~/.keras/retinet/dataset.zip')) as dataset:
-#     dataset.extractall('.')
-#     dataset.close()
+with zipfile.ZipFile(os.path.expanduser('~/.keras/retinet/dataset.zip')) as dataset:
+    dataset.extractall('.')
+    dataset.close()
 
 print('Loading dataset')
 dataset = h5py.File('dataset/oct.h5', mode='r')
@@ -46,9 +61,6 @@ print('Compiling model')
 model_yaml = yaml.load(open('dataset/retinet.yml').read())
 model = model_from_yaml(model_yaml)
 model.summary()
-model.compile(loss='categorical_crossentropy',
-              optimizer='adadelta',
-              metrics=['accuracy'])
 
 weights = [
     'dataset/retinet_weights0.h5', 'dataset/retinet_weights1.h5',
@@ -74,22 +86,57 @@ shuffle = [42, 44, 186, 132, 99, 119, 138, 103, 85, 105, 104, 148, 197, 142,
            62, 70, 189, 6, 28, 163]
 cscan_count = len(shuffle)
 
+fold_labels = []
+fold_results = []
 for fold in range(5):
+    print("Fold {0}:".format(fold))
+    print("[Cscan]\t\t[Result]\t[Label]")
+
     model.load_weights(weights[fold])
+    model.compile(loss='categorical_crossentropy',
+                  optimizer='adadelta',
+                  metrics=['accuracy'])
 
     test_idx = list( \
         range(int(round(float(fold) / 5. * cscan_count)),
               int(round((fold + 1.) / 5. * cscan_count))))
 
-    results = []
     for idx in test_idx:
-        sys.stdout.write("Evaluating fold {0}: [{1}%]  \r".format(fold, int(
-            round((idx / len(test_idx))))))
-        sys.stdout.flush()
-        cscans = np.expand_dims(
+        cscan = normalize(np.expand_dims(
             np.array(dataset['cscans'][0][shuffle[idx]], dtype=np.float32),
-            0)
-        results.append(model.predict(cscans, batch_size=1))
+            0))
+        result = model.predict(cscan, batch_size=1)[0]
+        label = labels[shuffle[idx]]
 
-    for i, result in enumerate(results):
-        print(result, labels[i])
+        mistake = abs(result[1] - label[1]) > 0.5
+        print("{0}({1})\t{2:1.3f}\t\t{3:1.3f}{4}".format(
+            "AMD\t" if label[1] == 1 else "Control ", shuffle[idx],
+            result[1], label[1], ' *' if mistake else ''))
+
+        fold_results.append(result)
+        fold_labels.append(label)
+
+    print()
+
+
+fold_labels = np.array(fold_labels, dtype=np.float)
+fold_results = np.array(fold_results, dtype=np.float)
+thresholds, all_metrics = metrics_curve(fold_labels[:, 1], fold_results[:, 1],
+                                        [fnr, fpr, tpr, recall, precision])
+all_metrics = np.array(all_metrics, dtype=np.float)
+
+fnr_vs_fpr = np.array(all_metrics[:, [0, 1]])
+roc = all_metrics[:, [1, 2]]
+roc_auc = area_under_curve(roc)
+
+thresh_for = lambda x, y: np.argmin(([abs(element[y] - x) for element in all_metrics]))
+thresh95 = thresh_for(0.05, 0)
+thresh99 = thresh_for(0.01, 0)
+
+fpr_threshold_95 = all_metrics[thresh95, 1]
+fpr_threshold_99 = all_metrics[thresh99, 1]
+
+print("Results:")
+print("ROC-AUC: {0:1.4f}".format(roc_auc))
+print("FPR 95%: {0:1.4f}".format(fpr_threshold_95))
+print("FPR 99%: {0:1.4f}".format(fpr_threshold_99))
