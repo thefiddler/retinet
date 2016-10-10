@@ -1,0 +1,10 @@
+dill
+numpy
+scipy
+theano
+matplotlib
+nose
+pycuda
+pillow
+keras
+h5py
